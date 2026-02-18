@@ -1,0 +1,29 @@
+{
+    "name": "basketball-booking-bot",
+    "version": "1.0.0",
+    "description": "Automated basketball court booking from WhatsApp group commitments",
+    "main": "src/index.js",
+    "type": "module",
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "node --watch src/index.js",
+        "get-group-id": "node src/get-group-id.js"
+    },
+    "keywords": [
+        "whatsapp",
+        "basketball",
+        "automation",
+        "booking"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "@hapi/boom": "^10.0.1",
+        "@whiskeysockets/baileys": "^6.7.8",
+        "better-sqlite3": "^11.7.0",
+        "dotenv": "^16.4.7",
+        "pino": "^9.5.0",
+        "playwright": "^1.58.2",
+        "qrcode-terminal": "^0.12.0"
+    }
+}
