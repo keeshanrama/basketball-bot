@@ -8,7 +8,7 @@
         "start": "node src/index.js",
         "dev": "node --watch src/index.js",
         "get-group-id": "node src/get-group-id.js",
-        "build": "npm rebuild better-sqlite3"
+        "build": "npm rebuild better-sqlite3 && npx playwright install --with-deps firefox"
     },
     "keywords": [
         "whatsapp",
