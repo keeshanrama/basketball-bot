@@ -23,7 +23,7 @@ class CourtReserveBooker {
     console.log('🌐 Launching browser...');
     
     this.browser = await firefox.launch({
-      headless: false,
+      headless: true,
       slowMo: 100
     });
 
