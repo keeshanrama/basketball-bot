@@ -1,0 +1,42 @@
+[phases.setup]
+nixPkgs = [
+  'nodejs_20',
+  'python3',
+  'gtk3',
+  'glib',
+  'dbus',
+  'at-spi2-atk',
+  'cups',
+  'libdrm',
+  'libxkbcommon',
+  'libxcomposite',
+  'libxdamage',
+  'libxfixes',
+  'libxrandr',
+  'mesa',
+  'nspr',
+  'nss',
+  'pango',
+  'alsa-lib',
+  'atk',
+  'cairo',
+  'expat',
+  'ffmpeg',
+  'freetype',
+  'gdk-pixbuf',
+  'gstreamer',
+  'libnotify',
+  'libuuid',
+  'xorg.libX11',
+  'xorg.libxcb',
+  'xorg.libXext'
+]
+
+[phases.install]
+cmds = [
+  'npm ci',
+  'npx playwright install --with-deps firefox'
+]
+
+[start]
+cmd = 'npm start'
