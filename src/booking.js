@@ -16,15 +16,18 @@ class CourtReserveBooker {
     this.browser = null;
     this.context = null;
     this.page = null;
-    this.portalBase = 'https://app.courtreserve.com/Online/Portal/Index/6765';
   }
 
   async initialize() {
     console.log('🌐 Launching browser...');
     
+    const isHeadless = process.env.HEADLESS !== 'false'; // default true (Railway), set HEADLESS=false for local
+    console.log(`🖥️  Browser headless mode: ${isHeadless}`);
+    
     this.browser = await firefox.launch({
-      headless: true,
-      slowMo: 100
+      headless: isHeadless,
+      slowMo: isHeadless ? 50 : 100,
+      args: isHeadless ? ['--no-sandbox', '--disable-setuid-sandbox'] : []
     });
 
     this.context = await this.browser.newContext({
@@ -81,504 +84,338 @@ class CourtReserveBooker {
     }
   }
 
-  // ───────────────────────────────────────────────────────────
-  //  NAVIGATION: go straight to the booking scheduler for a date
-  // ───────────────────────────────────────────────────────────
-
   /**
-   * Navigate to the booking page and land on the correct date.
-   * Goes through the portal menu to reach "Book a Full Court",
-   * then navigates the scheduler's day-view to the target date.
+   * Shared helper: open the calendar picker and navigate to the correct month/year
    */
-  async _navigateToBookingPage(gameDate) {
-    console.log('🏠 Going to portal home...');
-    await this.page.goto(this.portalBase, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await this.page.waitForTimeout(2000);
-
-    console.log('🔵 Clicking menu button...');
-    await this.page.click('a[href="#menu"]');
-    await this.page.waitForTimeout(1000);
-
-    console.log('🏀 Clicking "Book Basketball"...');
-    await this.page.click('a:has-text("Book Basketball"), button:has-text("Book Basketball")');
-    await this.page.waitForTimeout(1000);
-
-    console.log('📋 Clicking "Book a Full Court"...');
-    await this.page.click('a:has-text("Book a Full Court")');
-    await this.page.waitForTimeout(2000);
-    await this.page.screenshot({ path: 'step-scheduler-loaded.png' });
-
-    // Navigate the scheduler to the target date
-    await this._navigateSchedulerToDate(gameDate);
-    await this.page.screenshot({ path: 'step-date-selected.png' });
-  }
-
-  /**
-   * Navigate the Kendo scheduler's day-view to the target date.
-   * Uses smart direction detection (forward vs backward) to minimize clicks.
-   */
-  async _navigateSchedulerToDate(gameDate) {
-    const targetDay = gameDate.getDate();
-    const targetMonthName = MONTH_NAMES[gameDate.getMonth()];
+  async _openAndNavigateCalendar(gameDate) {
+    const targetMonth = gameDate.getMonth();
     const targetYear = gameDate.getFullYear();
-
+    const targetMonthName = MONTH_NAMES[targetMonth];
+    const targetDay = gameDate.getDate();
+  
     console.log(`📅 Navigating scheduler to ${targetMonthName} ${targetDay}, ${targetYear}...`);
-
-    const targetPatterns = this._buildDatePatterns(gameDate);
-
-    for (let attempts = 0; attempts < 90; attempts++) {
-      const currentDateText = await this._getSchedulerDateText();
+  
+    // The scheduler shows one day at a time - use forward arrow to navigate day by day
+    // Read current date from the toolbar
+    for (let attempts = 0; attempts < 60; attempts++) {
+      const currentDateText = await this.page.$eval(
+        '.k-scheduler-toolbar .k-nav-current, [data-testid="link-0"], .fn-scheduler-toolbar-name',
+        el => el.textContent.trim()
+      ).catch(() => '');
+  
       console.log(`📅 Scheduler showing: "${currentDateText}"`);
-
-      if (this._dateTextMatches(currentDateText, targetPatterns)) {
+  
+      // Check if we're on the right date
+      // Text format is like "Monday, February 16, 2026" or "Mon, Feb 16"
+      const targetDateStr = gameDate.toLocaleDateString('en-US', { 
+        month: 'long', day: 'numeric', year: 'numeric' 
+      }); // "March 6, 2026"
+      const targetDateShort = `${targetMonthName.substring(0,3)} ${targetDay}`; // "Mar 6"
+  
+      if (
+        currentDateText.includes(targetDateStr) ||
+        currentDateText.includes(`${targetMonthName} ${targetDay}`) ||
+        (currentDateText.includes(targetMonthName.substring(0,3)) && 
+         currentDateText.includes(` ${targetDay},`) ||
+         currentDateText.includes(` ${targetDay} `))
+      ) {
         console.log(`✅ Scheduler is on correct date!`);
         return;
       }
-
-      // Determine direction: compare parsed current date vs target
-      const currentDate = this._parseDateFromToolbar(currentDateText);
-      const direction = (!currentDate || currentDate < gameDate) ? 'next' : 'prev';
-
+  
+      // Click the forward arrow on the main scheduler toolbar
+      console.log(`⏭️ Clicking next day...`);
       try {
-        if (direction === 'next') {
-          await this.page.click(
-            '.k-scheduler-toolbar .k-nav-next, [data-testid="link-2"], button[aria-label="Next"]'
-          );
-        } else {
-          await this.page.click(
-            '.k-scheduler-toolbar .k-nav-prev, [data-testid="link-1"], button[aria-label="Previous"]'
-          );
-        }
-        await this.page.waitForTimeout(400);
+        await this.page.click(
+          '.k-scheduler-toolbar .k-nav-next, [data-testid="link-2"], button[aria-label="Next"]'
+        );
+        await this.page.waitForTimeout(500);
       } catch (e) {
-        console.log(`⚠️ Could not click ${direction}:`, e.message);
+        console.log('⚠️ Could not click next:', e.message);
         break;
       }
     }
-
-    console.log('⚠️ Could not confirm scheduler is on correct date after max attempts');
+  }
+  
+  async _selectDay(gameDate) {
+    // When using the scheduler day view, the date is already selected by navigation
+    // No need to click a calendar day
+    console.log(`✅ Date already selected via scheduler navigation`);
   }
 
-  /** Read the current date text from the scheduler toolbar */
-  async _getSchedulerDateText() {
-    return this.page.$eval(
-      '.k-scheduler-toolbar .k-nav-current, [data-testid="link-0"], .fn-scheduler-toolbar-name',
-      el => el.textContent.trim()
-    ).catch(() => '');
-  }
-
-  /** Build an array of substrings that would confirm we're on the right date */
-  _buildDatePatterns(gameDate) {
+  /**
+   * Shared helper: click on the correct day in the open calendar
+   */
+  async _selectDay(gameDate) {
     const day = gameDate.getDate();
-    const monthName = MONTH_NAMES[gameDate.getMonth()];
-    const monthShort = monthName.substring(0, 3);
+    const month = gameDate.getMonth();
     const year = gameDate.getFullYear();
 
-    return [
-      `${monthName} ${day}, ${year}`,   // "March 6, 2026"
-      `${monthName} ${day} ${year}`,     // "March 6 2026"
-      `${monthShort} ${day}, ${year}`,   // "Mar 6, 2026"
-      // For schedulers that don't show year, match "March 6," or "Mar 6,"
-      `${monthName} ${day},`,
-      `${monthShort} ${day},`,
-    ];
-  }
+    console.log(`🗓️ Clicking on day ${day} (${month + 1}/${day}/${year})...`);
 
-  /** Check if the toolbar text matches any of our expected patterns */
-  _dateTextMatches(text, patterns) {
-    return patterns.some(p => text.includes(p));
-  }
-
-  /** Try to extract a Date from toolbar text like "Monday, February 17, 2026" */
-  _parseDateFromToolbar(text) {
     try {
-      const m = text.match(/(\w+)\s+(\d{1,2}),?\s+(\d{4})/);
-      if (m) {
-        const monthIdx = MONTH_NAMES.findIndex(n => n.startsWith(m[1].substring(0, 3)));
-        if (monthIdx >= 0) {
-          return new Date(parseInt(m[3]), monthIdx, parseInt(m[2]));
+      await this.page.waitForSelector('.k-calendar', { timeout: 5000 });
+
+      // Use evaluate to find exact day in the visible calendar
+      // avoiding clicking days from prev/next month overflow
+      const clicked = await this.page.evaluate((targetDay) => {
+        const calendarCells = document.querySelectorAll('.k-calendar td[role="gridcell"]:not(.k-other-month) a, .k-calendar .k-link');
+        for (const cell of calendarCells) {
+          if (cell.textContent.trim() === targetDay.toString()) {
+            cell.click();
+            return true;
+          }
         }
+        return false;
+      }, day);
+
+      if (clicked) {
+        console.log(`✅ Clicked day ${day} in current month`);
+      } else {
+        // Fallback: click by text
+        await this.page.click(`text="${day}"`);
+        console.log(`✅ Clicked day ${day} via text selector`);
       }
-    } catch (e) {}
-    return null;
-  }
-
-  // ───────────────────────────────────────────────────────────
-  //  TIME SLOT DISCOVERY & MATCHING
-  // ───────────────────────────────────────────────────────────
-
-  /**
-   * Build all the time-string variants we need to match against the DOM.
-   * Centralizes ALL time formatting so booking and availability use the same logic.
-   */
-  _buildTimeMatchData(timeRange) {
-    const startHour24 = parseInt(timeRange.startTime.split(':')[0]);
-    const startMin = timeRange.startTime.split(':')[1] || '00';
-    // Convert 24h → 12h correctly for all edge cases (0, 12, 13-23)
-    const displayHour = startHour24 === 0  ? 12
-                      : startHour24 > 12   ? startHour24 - 12
-                      : startHour24;
-    const amPm = startHour24 >= 12 ? 'PM' : 'AM';
-
-    // Human-readable label: "9:00 PM"
-    const timeLabel = `${displayHour}:${startMin} ${amPm}`;
-
-    // URL-encoded patterns for data-href matching:
-    //   CourtReserve encodes times in URLs like "...2026%209:00%20PM..."
-    //   The %20 before the hour prevents "1:00" from matching inside "11:00"
-    const urlDisplayPattern = new RegExp(
-      `%20${displayHour}:${startMin}%20${amPm}`, 'i'
-    );
-    // 24h variant: "%2021:00"
-    const url24hPattern = new RegExp(
-      `%20${startHour24}:${startMin}(?:%20|&|$)`, 'i'
-    );
-
-    // For aria-label / visible text: ensure "1:00 PM" doesn't match "11:00 PM"
-    // by requiring a non-digit (or start-of-string) before the hour.
-    //
-    // CRITICAL: Also must NOT match the END time in range strings like
-    // "at 9:00 PM to 10:00 PM". The word "to" before a time means it's
-    // an end-time, not a start-time. We use a negative lookbehind for "to ".
-    const strictStartTimeRegex = new RegExp(
-      `(?:^|[^\\d])(?<!to\\s)${displayHour}:${startMin}\\s*${amPm}`, 'i'
-    );
-
-    // For the dataTime field which contains JUST the start time like "10:00 PM"
-    // we can use an exact match
-    const exactTimeRegex = new RegExp(
-      `^\\s*${displayHour}:${startMin}\\s*${amPm}\\s*$`, 'i'
-    );
-
-    return {
-      startHour24,
-      displayHour,
-      amPm,
-      startMin,
-      timeLabel,
-      urlDisplayPattern,
-      url24hPattern,
-      strictStartTimeRegex,
-      exactTimeRegex,
-    };
-  }
-
-  /**
-   * Scroll the scheduler so the target time slot row is visible.
-   * Uses proportional scrolling based on hour position instead of blind scrolling.
-   * Also scrolls BOTH the internal Kendo scheduler container AND the time labels sidebar.
-   */
-  async _scrollToTargetTime(startHour24) {
-    console.log(`📜 Scrolling to bring ${startHour24}:00 into view...`);
-
-    // Step 1: Scroll the Kendo scheduler's internal scrollable content area
-    await this.page.evaluate((targetHour) => {
-      // The scheduler has TWO scrollable areas that need to stay in sync:
-      // 1. The content area (where the slots/buttons are)
-      // 2. The times sidebar (where "5:00 AM", "6:00 AM" etc are shown)
-      const contentArea = document.querySelector(
-        '.k-scheduler-content, [class*="scheduler-content"]'
-      );
-      const timesArea = document.querySelector(
-        '.k-scheduler-times .k-scheduler-table'
-      )?.parentElement;
-
-      if (contentArea) {
-        const totalHeight = contentArea.scrollHeight;
-        const rowHeight = totalHeight / 24;
-        const targetScroll = Math.max(0, (targetHour - 1) * rowHeight);
-        contentArea.scrollTop = targetScroll;
-        
-        // Also sync the times sidebar if it's a separate scroll container
-        if (timesArea && timesArea !== contentArea) {
-          timesArea.scrollTop = targetScroll;
+    } catch (e) {
+      console.log('⚠️ Primary click failed, trying fallback...');
+      await this.page.evaluate((targetDay) => {
+        const allElements = document.querySelectorAll('a, button, td');
+        for (const el of allElements) {
+          if (el.textContent.trim() === targetDay.toString()) {
+            el.click();
+            break;
+          }
         }
-      }
-    }, startHour24);
-
-    await this.page.waitForTimeout(800);
-
-    // Step 2: Find the actual time label element and use scrollIntoView
-    // This is more reliable than proportional math since it targets the exact element
-    const scrolledToLabel = await this.page.evaluate((targetHour) => {
-      const hour12 = targetHour === 0 ? 12 : targetHour > 12 ? targetHour - 12 : targetHour;
-      const amPm = targetHour >= 12 ? 'PM' : 'AM';
-      const targetText = `${hour12}:00 ${amPm}`;
-      
-      // Search all text in the scheduler times column
-      const allCells = document.querySelectorAll(
-        '.k-scheduler-times td, .k-scheduler-times th, ' +
-        '.k-scheduler-table td, [class*="scheduler"] td'
-      );
-      for (const cell of allCells) {
-        const text = cell.textContent.trim();
-        if (text === targetText || text === `${hour12}:00`) {
-          cell.scrollIntoView({ block: 'center', behavior: 'instant' });
-          return text;
-        }
-      }
-
-      // Fallback: look for the time in any element on the page
-      const allElements = document.querySelectorAll('td, th, div, span');
-      for (const el of allElements) {
-        if (el.children.length === 0 && el.textContent.trim() === targetText) {
-          el.scrollIntoView({ block: 'center', behavior: 'instant' });
-          return el.textContent.trim();
-        }
-      }
-
-      return null;
-    }, startHour24);
-
-    if (scrolledToLabel) {
-      console.log(`📜 Scrolled to time label: "${scrolledToLabel}"`);
-    } else {
-      console.log(`⚠️ Could not find time label for ${startHour24}:00, using proportional scroll`);
+      }, day);
     }
-
-    await this.page.waitForTimeout(500);
   }
 
   /**
-   * Gather all slot button data from the page in one pass.
-   * Captures every useful attribute since CourtReserve's DOM varies.
+   * Shared helper: scroll to make PM time slots visible
    */
-  async _getAllSlotButtons() {
-    return this.page.evaluate(() => {
-      const results = [];
-      // Broad selector: find all clickable elements that look like reserve buttons
-      const buttons = document.querySelectorAll(
-        'a.slot-btn, a.btn-consolidate-slot, [class*="slot-btn"], ' +
-        'a[data-href*="Reservation"], a[href*="Reservation"], ' +
-        'a.reserve-btn, button.reserve-btn, ' +
-        '[class*="reserve"], [class*="Reserve"]'
+  async _scrollToTimeSlots() {
+    await this.page.evaluate(() => {
+      const schedulerContent = document.querySelector(
+        '.k-scheduler-content, .k-scrollbar-v, [class*="scheduler-content"]'
       );
-      buttons.forEach((btn, index) => {
-        // Collect ALL attributes for debugging
-        const attrs = {};
-        for (const attr of btn.attributes) {
-          attrs[attr.name] = attr.value.substring(0, 200);
-        }
-        
-        // Walk up to find the parent time-slot container's attributes
-        const parentSlot = btn.closest('[data-time], [aria-label], [class*="slot"]');
-        const parentAriaLabel = parentSlot?.getAttribute('aria-label') || '';
-        const parentDataTime = parentSlot?.getAttribute('data-time') || '';
-        const parentDataHref = parentSlot?.getAttribute('data-href') || '';
-
-        results.push({
-          index,
-          ariaLabel: btn.getAttribute('aria-label') || '',
-          dataHref: btn.getAttribute('data-href') || '',
-          href: btn.getAttribute('href') || '',
-          onclick: btn.getAttribute('onclick') || '',
-          text: btn.textContent.trim().substring(0, 100),
-          className: btn.className,
-          tagName: btn.tagName,
-          // Parent container info
-          parentAriaLabel,
-          parentDataTime,
-          parentDataHref,
-          // All attributes for debugging
-          allAttrs: JSON.stringify(attrs).substring(0, 500),
-        });
-      });
-      return results;
+      if (schedulerContent) schedulerContent.scrollTop = schedulerContent.scrollHeight / 2;
+      window.scrollTo(0, document.body.scrollHeight / 2);
     });
-  }
+    await this.page.waitForTimeout(1000);
 
-  /**
-   * Gather all "none available" indicator data from the page in one pass.
-   */
-  async _getAllUnavailableSlots() {
-    return this.page.evaluate(() => {
-      const results = [];
-      const slots = document.querySelectorAll(
-        '.not-available-courts-container, [data-testid="noneAvailableBtn"], [class*="not-available"]'
-      );
-      slots.forEach(slot => {
-        results.push({
-          dataTime: slot.getAttribute('data-time') || '',
-          parentAriaLabel: slot.closest('[aria-label]')?.getAttribute('aria-label') || '',
-          parentDataTime: slot.closest('[data-time]')?.getAttribute('data-time') || '',
-          text: slot.textContent.trim().substring(0, 100),
-        });
-      });
-      return results;
+    // Also do a full scroll to ensure all slots are loaded
+    await this.page.evaluate(() => {
+      const schedulers = document.querySelectorAll('.k-scheduler-content, [role="presentation"]');
+      schedulers.forEach(s => s.scrollTop = 99999);
+      window.scrollTo(0, 99999);
     });
+    await this.page.waitForTimeout(1500);
   }
-
-  /**
-   * Check if a slot button matches our target time.
-   * Single source of truth for time matching — used by both book and check.
-   */
-  _slotMatchesTime(slotData, matchData) {
-    const { ariaLabel, dataHref, href, parentAriaLabel, parentDataTime, parentDataHref, text, onclick } = slotData;
-    const { strictStartTimeRegex, exactTimeRegex, urlDisplayPattern, url24hPattern, timeLabel } = matchData;
-
-    // Check URLs (data-href, href, parent data-href, onclick)
-    for (const urlToCheck of [dataHref, href, parentDataHref, onclick]) {
-      if (!urlToCheck) continue;
-      if (urlDisplayPattern.test(urlToCheck)) return true;
-      if (url24hPattern.test(urlToCheck)) return true;
-    }
-
-    // Check aria-labels (own + parent) with start-time-only regex
-    for (const label of [ariaLabel, parentAriaLabel]) {
-      if (!label) continue;
-      if (strictStartTimeRegex.test(label)) return true;
-    }
-
-    // Check the dataTime field on parent (exact match, e.g. "10:00 PM")
-    if (parentDataTime && exactTimeRegex.test(parentDataTime)) return true;
-
-    // Check visible text content (e.g. button says "Reserve" inside a 10:00 PM row)
-    // Only useful if the text itself contains the time
-    if (text && strictStartTimeRegex.test(text)) return true;
-
-    return false;
-  }
-
-  /**
-   * Check if an unavailable slot indicator matches our target time.
-   * 
-   * CRITICAL: The parentAriaLabel often contains a RANGE like
-   * "null on Friday, March 6, 2026 at 9:00 PM to 10:00 PM"
-   * We must match only the START time (after "at"), not the END time (after "to").
-   * 
-   * The dataTime field contains just the start time like "9:00 PM" — use exact match.
-   */
-  _unavailableMatchesTime(unavailData, matchData) {
-    const { dataTime, parentAriaLabel, parentDataTime } = unavailData;
-    const { strictStartTimeRegex, exactTimeRegex, urlDisplayPattern, url24hPattern } = matchData;
-
-    // dataTime is the most reliable — it's just the start time, e.g. "9:00 PM"
-    if (dataTime && exactTimeRegex.test(dataTime)) return true;
-
-    // parentDataTime is also typically just the start time
-    if (parentDataTime && exactTimeRegex.test(parentDataTime)) return true;
-
-    // parentAriaLabel contains a range — use the start-time-only regex
-    // which has a negative lookbehind for "to " to avoid matching end times
-    if (parentAriaLabel && strictStartTimeRegex.test(parentAriaLabel)) return true;
-
-    // URL-encoded checks on all fields
-    for (const field of [dataTime, parentAriaLabel, parentDataTime]) {
-      if (!field) continue;
-      if (urlDisplayPattern.test(field)) return true;
-      if (url24hPattern.test(field)) return true;
-    }
-
-    return false;
-  }
-
-  // ───────────────────────────────────────────────────────────
-  //  MAIN BOOKING FLOW
-  // ───────────────────────────────────────────────────────────
 
   async bookCourt(gameDate, timeRange, courtName) {
     console.log(`📅 Booking court for ${gameDate.toLocaleDateString()} at ${timeRange.startDisplay}-${timeRange.endDisplay}`);
     
     try {
-      // Step 1-4: Navigate to booking page on the correct date
-      await this._navigateToBookingPage(gameDate);
-      console.log('📸 Booking page loaded and date selected');
+      console.log('📍 Current URL:', this.page.url());
+      
+      const portalUrl = 'https://app.courtreserve.com/Online/Portal/Index/6765';
+      console.log('🏠 Going to portal home...');
+      
+      await this.page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page.waitForTimeout(2000);
+      await this.page.screenshot({ path: 'step1-home.png' });
+      console.log('📸 Step 1: Home page loaded');
+      
+      console.log('🔵 Clicking menu button...');
+      await this.page.click('a[href="#menu"]');
+      await this.page.waitForTimeout(1000);
+      await this.page.screenshot({ path: 'step2-menu-open.png' });
+      console.log('📸 Step 2: Menu opened');
 
-      // Build centralized time matching data
-      const matchData = this._buildTimeMatchData(timeRange);
-      console.log(`🔍 Looking for time slot: ${matchData.timeLabel} (${matchData.startHour24}:00 in 24h)`);
+      console.log('🏀 Clicking "Book Basketball"...');
+      await this.page.click('a:has-text("Book Basketball"), button:has-text("Book Basketball")');
+      await this.page.waitForTimeout(1000);
+      await this.page.screenshot({ path: 'step3-book-basketball.png' });
+      console.log('📸 Step 3: Book Basketball clicked');
 
-      // Step 5: Scroll to bring the target time into view
-      await this._scrollToTargetTime(matchData.startHour24);
-      await this.page.screenshot({ path: 'step-scrolled.png' });
+      console.log('📋 Clicking "Book a Full Court"...');
+      await this.page.click('a:has-text("Book a Full Court")');
+      await this.page.waitForTimeout(2000);
+      await this.page.screenshot({ path: 'step4-booking-calendar.png' });
+      console.log('📸 Step 4: Booking calendar loaded');
 
-      // Step 6: Gather all slot data for debugging and matching
-      const allSlots = await this._getAllSlotButtons();
-      console.log(`📊 Found ${allSlots.length} reserve buttons on page`);
-      for (const s of allSlots.slice(0, 20)) {
-        console.log(`  slot #${s.index}: text="${s.text}" parentTime="${s.parentDataTime}" parentAria="${s.parentAriaLabel.substring(0, 80)}"`);
-        if (!s.ariaLabel && !s.dataHref && !s.href && !s.parentAriaLabel) {
-          console.log(`    allAttrs: ${s.allAttrs}`);
+      // Step 5: Open calendar and navigate to correct month
+      await this._openAndNavigateCalendar(gameDate);
+      await this.page.screenshot({ path: 'step5-calendar-opened.png' });
+      console.log('📸 Step 5: Calendar on correct month');
+
+      // Step 6: Click the correct day
+      await this._selectDay(gameDate);
+      await this.page.waitForTimeout(2000);
+      await this.page.screenshot({ path: 'step6-date-selected.png' });
+      console.log('📸 Step 6: Date selected');
+
+      // Step 7: Scroll to time slots and find the right one
+      console.log(`🕐 Looking for ${timeRange.startDisplay} Reserve button...`);
+      await this.page.waitForTimeout(2000);
+
+      const startHour24 = parseInt(timeRange.startTime.split(':')[0]);
+      const displayHour = startHour24 > 12 ? startHour24 - 12 : startHour24;
+      const amPm = startHour24 >= 12 ? 'PM' : 'AM';
+      const timeLabel = `${displayHour}:00 ${amPm}`;
+
+      console.log(`🔍 Looking for time slot: ${timeLabel} (${startHour24}:00 in 24h)`);
+
+      console.log('📜 Scrolling down to find time slots...');
+      await this._scrollToTimeSlots();
+      await this.page.screenshot({ path: 'step7-scrolled.png' });
+
+      // Check if slot is already booked
+      console.log('🔍 Checking if slot is already booked...');
+      const isAlreadyBooked = await this.page.evaluate((targetHour24) => {
+        const displayHour = targetHour24 > 12 ? targetHour24 - 12 : targetHour24;
+        const amPm = targetHour24 >= 12 ? 'PM' : 'AM';
+        const exactHourRegex = new RegExp(`\\b${displayHour}:00 ${amPm}\\b`);
+        const exactHourUrlRegex = new RegExp(`%20${displayHour}:00%20${amPm}`);
+      
+        const noneAvailableSlots = document.querySelectorAll(
+          '.not-available-courts-container, [data-testid="noneAvailableBtn"], [class*="not-available"]'
+        );
+        for (const slot of noneAvailableSlots) {
+          const dataTime = slot.getAttribute('data-time') || '';
+          const parentAriaLabel = slot.closest('[aria-label]')?.getAttribute('aria-label') || '';
+          const parentDataTime = slot.closest('[data-time]')?.getAttribute('data-time') || '';
+          if (
+            exactHourRegex.test(dataTime) ||
+            exactHourRegex.test(parentAriaLabel) ||
+            exactHourRegex.test(parentDataTime) ||
+            exactHourUrlRegex.test(dataTime) ||
+            exactHourUrlRegex.test(parentAriaLabel) ||
+            exactHourUrlRegex.test(parentDataTime)
+          ) {
+            return true;
+          }
         }
-      }
+        return false;
+      }, startHour24);
 
-      // Step 7: Check if slot is unavailable
-      const unavailableSlots = await this._getAllUnavailableSlots();
-      console.log(`📊 Found ${unavailableSlots.length} unavailable indicators`);
-
-      if (unavailableSlots.some(s => this._unavailableMatchesTime(s, matchData))) {
-        console.log(`❌ Time slot ${matchData.timeLabel} is already fully booked`);
-        await this.page.screenshot({ path: 'slot-already-booked.png' });
+      if (isAlreadyBooked) {
+        console.log(`❌ Time slot ${timeLabel} is already fully booked (NONE AVAILABLE)`);
+        await this.page.screenshot({ path: 'slot-already-booked.png', fullPage: false });
         return {
           success: false,
           alreadyBooked: true,
-          message: `The ${matchData.timeLabel} slot is already fully booked`,
+          message: `The ${timeLabel} slot is already fully booked`,
           screenshots: { failure: 'slot-already-booked.png' }
         };
       }
 
-      // Step 8: Find the matching reserve button
-      let targetSlotIndex = -1;
-      for (const slot of allSlots) {
-        if (this._slotMatchesTime(slot, matchData)) {
-          targetSlotIndex = slot.index;
-          console.log(`✅ Matched slot #${slot.index}: aria="${slot.ariaLabel.substring(0, 70)}"`);
-          break;
-        }
+      // Find and click Reserve button
+      const reserveButtons = await this.page.$$('a.slot-btn, a.btn-consolidate-slot, [class*="slot-btn"]');
+      console.log(`Found ${reserveButtons.length} reserve buttons`);
+
+      let timeSlotClicked = false;
+
+      for (const button of reserveButtons) {
+        try {
+          const ariaLabel = await button.getAttribute('aria-label') || '';
+          const dataHref = await button.getAttribute('data-href') || '';
+          if (ariaLabel) console.log(`Checking button: ${ariaLabel.substring(0, 80)}`);
+          else if (dataHref) console.log(`Checking button href: ${dataHref.substring(0, 80)}`);
+          
+            // Use regex to match exact hour - prevents "1:00" matching "12:00"
+            // URL format: "2026%201:00%20PM" - we match hour preceded by "%20" 
+            const exactHourRegex = new RegExp(`%20${displayHour}:00%20${amPm}`);
+            const exact24hRegex = new RegExp(`%20${startHour24}:00%20`);
+
+            const matchesTime = 
+            ariaLabel.includes(timeLabel) ||
+            exactHourRegex.test(dataHref) ||
+            exact24hRegex.test(dataHref);
+          
+          if (matchesTime) {
+            console.log(`✅ Found correct time slot: ${timeLabel}`);
+            await button.scrollIntoViewIfNeeded();
+            await this.page.waitForTimeout(500);
+            await button.click();
+            timeSlotClicked = true;
+            await this.page.waitForTimeout(2000);
+            break;
+          }
+        } catch (e) {}
       }
 
-      if (targetSlotIndex === -1) {
-        console.log(`❌ Could not find time slot: ${matchData.timeLabel}`);
-        console.log('🔍 All available slots (full dump):');
-        for (const s of allSlots) {
-          console.log(`  - text="${s.text}" parentTime="${s.parentDataTime}" parentAria="${s.parentAriaLabel.substring(0, 100)}" attrs=${s.allAttrs}`);
-        }
-        await this.page.screenshot({ path: 'time-slot-not-found.png', fullPage: true });
+      if (!timeSlotClicked) {
+        console.log('❌ Could not find time slot, taking screenshot...');
+        await this.page.screenshot({ path: 'time-slot-not-found.png' });
         return {
           success: false,
-          message: `Could not find time slot: ${matchData.timeLabel}`,
+          message: `Could not find time slot: ${timeLabel}`,
           screenshots: { failure: 'time-slot-not-found.png' }
         };
       }
 
-      // Step 9: Click the matched button (by index to avoid stale element handles)
-      const SLOT_SELECTOR = 'a.slot-btn, a.btn-consolidate-slot, [class*="slot-btn"], ' +
-        'a[data-href*="Reservation"], a[href*="Reservation"], ' +
-        'a.reserve-btn, button.reserve-btn, ' +
-        '[class*="reserve"], [class*="Reserve"]';
+      await this.page.screenshot({ path: 'step7-timeslot.png' });
+      console.log('📸 Step 7: Time slot clicked');
 
-      await this.page.evaluate(({idx, sel}) => {
-        const buttons = document.querySelectorAll(sel);
-        if (buttons[idx]) buttons[idx].scrollIntoView({ block: 'center' });
-      }, {idx: targetSlotIndex, sel: SLOT_SELECTOR});
-      await this.page.waitForTimeout(500);
-
-      await this.page.evaluate(({idx, sel}) => {
-        const buttons = document.querySelectorAll(sel);
-        if (buttons[idx]) buttons[idx].click();
-      }, {idx: targetSlotIndex, sel: SLOT_SELECTOR});
-
-      console.log('📸 Time slot clicked');
-      await this.page.waitForTimeout(2000);
-      await this.page.screenshot({ path: 'step-timeslot-clicked.png' });
-
-      // Step 10: Handle confirmation popup
+      // Step 8: Handle confirmation popup
       console.log('🎯 Waiting for confirmation popup...');
-      const confirmed = await this._handleConfirmation();
-      await this.page.screenshot({ path: 'step-confirmation.png', fullPage: true });
+      await this.page.waitForTimeout(2000);
 
-      // Step 11: Navigate back to verify the booking on the calendar
-      await this._navigateToBookingPage(gameDate);
-      await this._scrollToTargetTime(matchData.startHour24);
-      await this.page.screenshot({ path: 'step-booked-calendar.png', fullPage: true });
+      const confirmSelectors = [
+        'button:has-text("Confirm")', 'button:has-text("Complete Reservation")',
+        'button:has-text("Submit")', '.modal button:has-text("Book")',
+        '.modal button[type="submit"]', 'button:has-text("Reserve")',
+        '[class*="modal"] button'
+      ];
+
+      let confirmed = false;
+      for (const selector of confirmSelectors) {
+        try {
+          await this.page.waitForSelector(selector, { timeout: 5000 });
+          const element = await this.page.$(selector);
+          if (element) {
+            console.log(`✅ Found confirmation button: ${selector}`);
+            await element.click();
+            confirmed = true;
+            await this.page.waitForTimeout(2000);
+            break;
+          }
+        } catch (e) {}
+      }
+
+      await this.page.screenshot({ path: 'step8-confirmation.png', fullPage: true });
+      console.log('📸 Step 8: Confirmation page screenshot saved');
+
+      // Navigate back to show booked slot on calendar
+      console.log('📅 Navigating back to show booked slot on calendar...');
+      await this.page.goto('https://app.courtreserve.com/Online/Portal/Index/6765', {
+        waitUntil: 'domcontentloaded', timeout: 30000
+      });
+      await this.page.waitForTimeout(1000);
+      await this.page.click('a[href="#menu"]');
+      await this.page.waitForTimeout(1000);
+      await this.page.click('a:has-text("Book Basketball")');
+      await this.page.waitForTimeout(1000);
+      await this.page.click('a:has-text("Book a Full Court")');
+      await this.page.waitForTimeout(2000);
+
+      await this.page.evaluate(() => {
+        const schedulerContent = document.querySelector('.k-scheduler-content, [class*="scheduler-content"]');
+        if (schedulerContent) schedulerContent.scrollTop = schedulerContent.scrollHeight / 2;
+      });
+      await this.page.waitForTimeout(1000);
+
+      await this.page.screenshot({ path: 'step9-booked-calendar.png', fullPage: true });
+      console.log('📸 Step 9: Booked calendar screenshot saved');
 
       if (confirmed) {
         console.log('✅ Booking completed successfully!');
         return { 
           success: true, 
           screenshots: {
-            confirmation: 'step-confirmation.png',
-            calendar: 'step-booked-calendar.png'
+            confirmation: 'step8-confirmation.png',
+            calendar: 'step9-booked-calendar.png'
           }
         };
       } else {
@@ -587,15 +424,15 @@ class CourtReserveBooker {
           success: false, 
           message: 'Could not find confirmation button',
           screenshots: {
-            confirmation: 'step-confirmation.png',
-            calendar: 'step-booked-calendar.png'
+            confirmation: 'step8-confirmation.png',
+            calendar: 'step9-booked-calendar.png'
           }
         };
       }
 
     } catch (error) {
       console.error('❌ Booking failed:', error.message);
-      try { await this.page.screenshot({ path: 'booking-error.png' }); } catch (e) {}
+      await this.page.screenshot({ path: 'booking-error.png' });
       return { 
         success: false, 
         error: error.message,
@@ -604,117 +441,106 @@ class CourtReserveBooker {
     }
   }
 
-  /**
-   * Try to click the confirmation/submit button in a modal.
-   */
-  async _handleConfirmation() {
-    await this.page.waitForTimeout(2000);
-
-    const confirmSelectors = [
-      'button:has-text("Confirm")',
-      'button:has-text("Complete Reservation")',
-      'button:has-text("Submit")',
-      '.modal button:has-text("Book")',
-      '.modal button[type="submit"]',
-      'button:has-text("Reserve")',
-      '.modal .btn-primary, .modal .btn-success',
-      '[class*="modal"] button.btn-primary',
-    ];
-
-    for (const selector of confirmSelectors) {
-      try {
-        const element = await this.page.$(selector);
-        if (element && await element.isVisible()) {
-          console.log(`✅ Found confirmation button: ${selector}`);
-          await element.click();
-          await this.page.waitForTimeout(2000);
-          return true;
-        }
-      } catch (e) {}
-    }
-
-    // Last resort: scan any open modal for a confirm-like button
-    try {
-      const clicked = await this.page.evaluate(() => {
-        const modal = document.querySelector(
-          '.modal.show, .modal.in, [class*="modal"][style*="display: block"]'
-        );
-        if (!modal) return false;
-        const buttons = modal.querySelectorAll('button, a.btn');
-        for (const btn of buttons) {
-          const text = btn.textContent.trim().toLowerCase();
-          if (['confirm', 'submit', 'book', 'reserve', 'complete', 'ok', 'yes'].some(w => text.includes(w))) {
-            btn.click();
-            return true;
-          }
-        }
-        return false;
-      });
-      if (clicked) {
-        console.log('✅ Confirmed via modal button scan');
-        await this.page.waitForTimeout(2000);
-        return true;
-      }
-    } catch (e) {}
-
-    return false;
-  }
-
-  // ───────────────────────────────────────────────────────────
-  //  AVAILABILITY CHECK
-  // ───────────────────────────────────────────────────────────
-
   async checkAvailability(gameDate, timeRange) {
     console.log(`🔍 Checking availability for ${gameDate.toLocaleDateString()} at ${timeRange.startDisplay}`);
 
     try {
-      await this._navigateToBookingPage(gameDate);
+      console.log('📍 Current URL:', this.page.url());
 
-      const matchData = this._buildTimeMatchData(timeRange);
-      console.log(`🔍 Checking slot: ${matchData.timeLabel}`);
+      await this.page.goto('https://app.courtreserve.com/Online/Portal/Index/6765', {
+        waitUntil: 'domcontentloaded', timeout: 30000
+      });
+      await this.page.waitForTimeout(2000);
 
-      await this._scrollToTargetTime(matchData.startHour24);
+      await this.page.click('a[href="#menu"]');
       await this.page.waitForTimeout(1000);
 
-      // Gather all data in one pass
-      const allSlots = await this._getAllSlotButtons();
-      const unavailableSlots = await this._getAllUnavailableSlots();
+      await this.page.click('a:has-text("Book Basketball"), button:has-text("Book Basketball")');
+      await this.page.waitForTimeout(1000);
 
-      console.log(`📊 Reserve buttons: ${allSlots.length}, Unavailable: ${unavailableSlots.length}`);
-      for (const s of allSlots.slice(0, 15)) {
-        console.log(`  slot #${s.index}: text="${s.text}" parentTime="${s.parentDataTime}" parentAria="${s.parentAriaLabel.substring(0, 80)}"`);
-        if (!s.ariaLabel && !s.dataHref && !s.href && !s.parentAriaLabel) {
-          console.log(`    allAttrs: ${s.allAttrs}`);
+      await this.page.click('a:has-text("Book a Full Court")');
+      await this.page.waitForTimeout(2000);
+
+      // Open calendar and navigate to correct month
+      await this._openAndNavigateCalendar(gameDate);
+
+      // Click the correct day
+      await this._selectDay(gameDate);
+      await this.page.waitForTimeout(2000);
+
+      // Scroll to time slots
+      await this._scrollToTimeSlots();
+
+      const startHour24 = parseInt(timeRange.startTime.split(':')[0]);
+      const displayHour = startHour24 > 12 ? startHour24 - 12 : startHour24;
+      const amPm = startHour24 >= 12 ? 'PM' : 'AM';
+      const timeLabel = `${displayHour}:00 ${amPm}`;
+
+      console.log(`🔍 Checking slot: ${timeLabel}`);
+      const slotStatus = await this.page.evaluate((targetHour24) => {
+        const displayHour = targetHour24 > 12 ? targetHour24 - 12 : targetHour24;
+        const amPm = targetHour24 >= 12 ? 'PM' : 'AM';
+        const hourStr = `${displayHour}:00 ${amPm}`;
+      
+        // Use exact word boundary matching to avoid "10" matching inside "none available" checks
+        const exactHourRegex = new RegExp(`\\b${displayHour}:00 ${amPm}\\b`);
+        const exactHourUrlRegex = new RegExp(`%20${displayHour}:00%20${amPm}`);
+        const exact24hUrlRegex = new RegExp(`%20${targetHour24}:00%20`);
+      
+        // Check NONE AVAILABLE slots - use exact match
+        const noneAvailable = document.querySelectorAll(
+          '.not-available-courts-container, [data-testid="noneAvailableBtn"], [class*="not-available"]'
+        );
+        for (const slot of noneAvailable) {
+          const dataTime = slot.getAttribute('data-time') || '';
+          const parentAriaLabel = slot.closest('[aria-label]')?.getAttribute('aria-label') || '';
+          const parentDataTime = slot.closest('[data-time]')?.getAttribute('data-time') || '';
+      
+          // Use exact regex match - "10:00 PM" won't match "9:00 PM" etc
+          if (
+            exactHourRegex.test(dataTime) ||
+            exactHourRegex.test(parentAriaLabel) ||
+            exactHourRegex.test(parentDataTime) ||
+            exactHourUrlRegex.test(dataTime) ||
+            exactHourUrlRegex.test(parentAriaLabel) ||
+            exactHourUrlRegex.test(parentDataTime)
+          ) {
+            return 'unavailable';
+          }
         }
-      }
-      for (const s of unavailableSlots.slice(0, 15)) {
-        console.log(`  unavail: dataTime="${s.dataTime}" | parentAria="${s.parentAriaLabel.substring(0, 80)}"`);
-      }
+      
+        // Check Reserve buttons - use exact URL match
+        const reserveButtons = document.querySelectorAll('a.slot-btn, a.btn-consolidate-slot, [class*="slot-btn"]');
+        for (const btn of reserveButtons) {
+          const ariaLabel = btn.getAttribute('aria-label') || '';
+          const dataHref = btn.getAttribute('data-href') || '';
+      
+          if (
+            exactHourRegex.test(ariaLabel) ||
+            exactHourUrlRegex.test(dataHref) ||
+            exact24hUrlRegex.test(dataHref)
+          ) {
+            return 'available';
+          }
+        }
+      
+        return 'unknown';
+      }, startHour24);
 
-      // Check unavailable first
-      if (unavailableSlots.some(s => this._unavailableMatchesTime(s, matchData))) {
-        await this._scrollToTargetTime(matchData.startHour24);
-        await this.page.screenshot({ path: 'availability-check.png' });
-        console.log(`❌ Slot ${matchData.timeLabel} is unavailable`);
-        return { status: 'unavailable', timeLabel: matchData.timeLabel, screenshot: 'availability-check.png' };
-      }
-
-      // Check available
-      if (allSlots.some(s => this._slotMatchesTime(s, matchData))) {
-        await this._scrollToTargetTime(matchData.startHour24);
-        await this.page.screenshot({ path: 'availability-check.png' });
-        console.log(`✅ Slot ${matchData.timeLabel} is available`);
-        return { status: 'available', timeLabel: matchData.timeLabel, screenshot: 'availability-check.png' };
-      }
-
-      await this._scrollToTargetTime(matchData.startHour24);
       await this.page.screenshot({ path: 'availability-check.png' });
-      console.log(`⚠️ Slot ${matchData.timeLabel} status unknown`);
-      return { status: 'unknown', timeLabel: matchData.timeLabel, screenshot: 'availability-check.png' };
+      console.log(`📸 Availability check screenshot saved - Status: ${slotStatus}`);
+
+      return {
+        status: slotStatus,
+        timeLabel,
+        screenshot: 'availability-check.png'
+      };
 
     } catch (error) {
       console.error('❌ Availability check failed:', error.message);
-      try { await this.page.screenshot({ path: 'availability-check-error.png' }); } catch (e) {}
+      try {
+        await this.page.screenshot({ path: 'availability-check-error.png' });
+      } catch (e) {}
       return {
         status: 'error',
         error: error.message,
